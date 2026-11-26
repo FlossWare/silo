@@ -128,7 +128,12 @@ def main():
                     dropped += 1
                     continue
                 u = r.get("url")
-                if not isinstance(u, str) or not u.startswith("http"):
+                # master/seed rows may carry non-http URI schemes (e.g.
+                # concept:// synthesized identifiers from concept-mining
+                # passes) — they are valid index rows. Only require a
+                # scheme separator. (The scan side stays http-only: real
+                # web URLs only.)
+                if not isinstance(u, str) or "://" not in u:
                     dropped += 1
                     continue
                 rec = master.setdefault(u, {"url": u})
