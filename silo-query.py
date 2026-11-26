@@ -245,7 +245,7 @@ def pdf_records(path):
                 continue
             if not isinstance(rec, dict):
                 continue
-            if "error" not in rec and "sha256" in rec:
+            if "error" not in rec and "sha256" in rec and "path" in rec:
                 out[rec["path"]] = (rec["sha256"], rec.get("size"), rec.get("mtime"))
     except OSError:
         return None
@@ -269,11 +269,17 @@ def diff_days(date, date2):
             changed[k] = {"files": x.get("files", 0) - y.get("files", 0),
                           "bytes": x.get("bytes", 0) - y.get("bytes", 0),
                           "aggregate_changed": True}
+    def _num(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
     return {"baseline": date2, "compared": date,
             "directories_added": added, "directories_removed": removed,
             "directories_changed": changed,
-            "totals": {"files": a.get("total_files", 0) - b.get("total_files", 0),
-                       "bytes": a.get("total_bytes", 0) - b.get("total_bytes", 0)}}
+            "totals": {"files": _num(a.get("total_files")) - _num(b.get("total_files")),
+                       "bytes": _num(a.get("total_bytes")) - _num(b.get("total_bytes"))}}
 
 
 def pdf_diff(date):
@@ -303,6 +309,7 @@ def pdf_diff(date):
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "silo-query/1.0"
+    timeout = 60  # per-connection cap: no slowloris starvation
 
     def log_message(self, fmt, *args):
         # unix-socket clients have an EMPTY client_address (unnamed),
@@ -368,7 +375,8 @@ class Handler(BaseHTTPRequestHandler):
             um["stale"] = bool(MASTER.error)
             if MASTER.error:
                 um["note"] = MASTER.error
-        out = {"ok": MASTER.state == "loaded" and bool(dates or snaps),
+        out = {"ok": (MASTER.state == "loaded" and not MASTER.error
+                      and bool(dates or snaps)),
                "artifacts": {"url_master": um,
                              "manifests": {"loaded": bool(dates), "dates": dates},
                              "pdf_snapshots": {"loaded": bool(snaps), "dates": snaps}}}
@@ -461,7 +469,10 @@ def main():
 
     sock_dir = os.path.dirname(SOCKET)
     if sock_dir:
-        os.makedirs(sock_dir, exist_ok=True)
+        # 0700 from birth: the old makedirs-under-umask left a window
+        # where another local user could plant a socket or symlink
+        os.makedirs(sock_dir, mode=0o700, exist_ok=True)
+        os.chmod(sock_dir, 0o700)  # exist_ok may have kept a looser mode
     if os.path.exists(SOCKET):
         os.unlink(SOCKET)
     import socket
