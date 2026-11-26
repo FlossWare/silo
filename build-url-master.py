@@ -109,6 +109,16 @@ def main():
         print(f"error: scan_root {scan_root!r} is not a directory", file=sys.stderr)
         sys.exit(2)
 
+    # Single-writer lock: the read->merge->replace on the master loses
+    # additions if two runs interleave. Hold an exclusive lock for the
+    # whole run (batch tool, single operator by design).
+    import fcntl
+    lock_fh = open(master_path + ".lock", "w")
+    try:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit(f"FATAL: another build-url-master run holds {master_path + '.lock'}")
+
     master = {}  # url -> record
 
     def load_seed(path, default_prov):
@@ -141,13 +151,17 @@ def main():
                           "http_status", "last_checked_at", "doc_id"):
                     if r.get(k) is not None and k not in rec:
                         rec[k] = r.get(k)
-                prov = r.get("provenance") or [default_prov]
-                if isinstance(prov, str):
+                prov = r.get("provenance")
+                if prov is None:
+                    prov = [default_prov]
+                elif isinstance(prov, str):
                     prov = [prov]
                 elif not isinstance(prov, list):
                     # a dict would iterate its keys into tags; anything
                     # else (int/bool) would crash — fall back instead
                     prov = [default_prov]
+                # an explicit empty list stays empty: `or` would have
+                # silently rewritten the author's provenance
                 rec.setdefault("provenance", [])
                 for p in prov:
                     if p not in rec["provenance"]:
@@ -213,10 +227,18 @@ def main():
     with open(tmp, "w", encoding="utf-8") as f:
         for u in sorted(master):
             f.write(json.dumps(master[u], ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())   # power-loss durability; replace alone is not
     os.replace(tmp, master_path)
     print(f"master: {len(master)} unique urls -> {master_path} "
           f"(scanned {scanned} files; skipped files={skipped_files} "
           f"lines={skipped_lines})")
+    if skipped_files or skipped_lines:
+        # MAJOR-fix: scan losses were stderr-only and the master was
+        # replaced without them — make the loss unmissable on stdout
+        print(f"WARNING: master written WITHOUT {skipped_files} skipped files "
+              f"and {skipped_lines} skipped lines (details on stderr above)",
+              flush=True)
 
 
 if __name__ == "__main__":

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """FlossWare corpus manifest generator (READ-ONLY).
 
-Produces <store>/corpus-manifest-<date>.json + .md — a one-time
+Produces ~/.FlossWare/corpus-manifest-<date>.json + .md — a one-time
 integrity baseline of the whole store.
 
 Method (documented in the manifest under "method"):
-  - Walk every file under the store root (nothing excluded; the manifest
+  - Walk every file under ~/.FlossWare (nothing excluded; the manifest
     output files themselves are skipped to avoid self-reference).
-  - Top-level directories that are symlinks (e.g., a store moved to an
+  - Top-level directories that are symlinks (e.g., sources/ moved to an
     external drive) are FOLLOWED: walked via their target and recorded
     with "symlink_target" so the manifest still covers the whole corpus.
   - Per TOP-LEVEL directory: file count, total bytes, and a deterministic
@@ -21,9 +21,7 @@ Method (documented in the manifest under "method"):
   - Sockets/FIFOs and zero-byte files are counted and reported, not hashed.
   - Hashing runs under `nice` with a bounded worker pool (default 4).
 
-Config (env): SILO_ROOT (default ~/corpus).
-
-Re-run:  python3 corpus_manifest.py [--date YYYY-MM-DD]
+Re-run:  python3 ~/.FlossWare/tools/corpus_manifest.py [--date YYYY-MM-DD]
 """
 from __future__ import annotations
 
@@ -37,6 +35,8 @@ import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+# The store is the corpus (ADR-0034): manifest baselines corpus/ only,
+# and the manifest outputs land at the store root (excluded via SKIP_NAMES)
 STORE = Path(os.environ.get("SILO_ROOT") or Path.home() / "corpus")
 SMALL_DIR_BYTES = 4 * 1024**3  # full per-file hashing threshold
 WORKERS = 4
@@ -190,6 +190,9 @@ def process_dir(args):
         "dir_failures": dir_fails,
         "dir_failure_examples": dir_fail_examples,
         "odd_permission_examples": odd_perms,
+        # MAJOR-fix: an entry with stat/dir failures must not imply full
+        # coverage — an unreadable directory looked identical to an empty
+        "incomplete": bool(stat_fails or dir_fails),
     }
 
 
@@ -225,6 +228,7 @@ def process_loose(skip_names):
         "sockets": 0, "fifos": 0, "symlinks": 0, "stat_failures": 0,
         "dir_failures": 0, "dir_failure_examples": [],
         "odd_permission_examples": [],
+        "incomplete": bool(notes),
         "symlinked_files": notes,
     }
 
@@ -299,7 +303,10 @@ def main():
     }
     out_json = STORE / f"corpus-manifest-{args.date}.json"
     tmp_json = STORE / f"corpus-manifest-{args.date}.json.tmp"
-    tmp_json.write_text(json.dumps(manifest, indent=1))
+    with open(tmp_json, "w", encoding="utf-8") as f:
+        f.write(json.dumps(manifest, indent=1))
+        f.flush()
+        os.fsync(f.fileno())  # power-loss durability; replace alone is not
     tmp_json.replace(out_json)  # atomic: never truncate an existing baseline
 
     md = [
@@ -331,7 +338,10 @@ def main():
             f"| {', '.join(anomalies) or '-'} |")
     out_md = STORE / f"corpus-manifest-{args.date}.md"
     tmp_md = STORE / f"corpus-manifest-{args.date}.md.tmp"
-    tmp_md.write_text("\n".join(md) + "\n")
+    with open(tmp_md, "w", encoding="utf-8") as f:
+        f.write("\n".join(md) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
     tmp_md.replace(out_md)
 
     print(f"\nMANIFEST DONE: {total_files:,} files, {total_bytes:,} bytes")

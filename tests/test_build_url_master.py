@@ -47,7 +47,7 @@ with tempfile.TemporaryDirectory() as t:
     # seed: valid + malformed + non-dict + no-url + dict-provenance
     seed = os.path.join(t, "seed.jsonl")
     with open(seed, "w") as f:
-        f.write('{"url":"https://seed.example/1"}\n'
+        f.write('{"url":"https://seed.example/1","provenance":[]}\n'
                 'not json at all\n'
                 '[1,2,3]\n'
                 '{"no_url":true}\n'
@@ -77,6 +77,10 @@ with tempfile.TemporaryDirectory() as t:
           "3 unparseable line(s) dropped from seed" in r.stderr)
     check("dict provenance did not crash and did not leak keys",
           rows["https://seed.example/2"]["provenance"] == ["seed-file"])
+    # MAJOR-fix regression: an explicit empty provenance list must be
+    # preserved, not rewritten to the default tag by `or`
+    check("explicit empty provenance preserved (no `or` clobber)",
+          rows["https://seed.example/1"].get("provenance") == [])
     check("symlinked master NOT rescanned (keep has no web-scrape-corpus tag)",
           "web-scrape-corpus" not in rows["https://master.example/keep"]["provenance"])
     check("scanned URLs tagged web-scrape-corpus",

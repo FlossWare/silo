@@ -1,24 +1,17 @@
 #!/usr/bin/env python3
-"""Per-PDF metadata manifest for a corpus (change detection).
+"""Per-PDF metadata manifest for the whole corpus (change detection).
 
-Walks every *.pdf under the configured roots and writes one JSONL line
-per file:
+Walks every *.pdf under corpus/public (symlinked USB store) and
+corpus/private, and writes one JSONL line per file:
   {path, size, sha256, mtime, magic_ok}
-magic_ok = file starts with %PDF (catches ciphertext masquerading as
-PDFs — e.g. client-side-encrypted exports — and truncated downloads).
-Unreadable files produce {path, error} records instead of aborting the
-run. A configured root that is missing (e.g. an unmounted drive) is
-FATAL: replacing the manifest would make a ledger diff see every PDF
-under it as removed.
+magic_ok = file starts with %PDF (catches CSE ciphertext masquerading
+as PDFs and truncated downloads). Unreadable files produce
+{path, error} records instead of aborting the run.
 
-Config (env):
-  SILO_PDF_ROOTS     colon-separated roots (default ~/corpus/public:~/corpus/private)
-  SILO_PDF_MANIFEST  output path (default ~/corpus/pdf-manifest.jsonl)
-
-Output is written to <out>.tmp then atomically moved into place.
-Re-run any time; an ingestion ledger can diff successive manifests to
-find new/changed/removed PDFs. Hashing runs under nice with a worker
-pool, streaming in chunks (no whole-file reads).
+Output: ~/.FlossWare/corpus/pdf-manifest.jsonl (+ .tmp then atomic move).
+Re-run any time; the ingestion ledger diffs successive manifests to find
+new/changed/removed PDFs. Hashing runs under nice with a worker pool,
+streaming in chunks (no whole-file reads).
 
 Requires Python >= 3.11 (hashlib.file_digest).
 """
@@ -31,7 +24,7 @@ ROOTS = [Path(p) for p in
           or f"{Path.home() / 'corpus/public'}:{Path.home() / 'corpus/private'}").split(":")
          if p.strip()]
 OUT = Path(os.environ.get("SILO_PDF_MANIFEST")
-           or Path.home() / "corpus/pdf-manifest.jsonl")
+           or Path.home() / ".FlossWare/corpus/pdf-manifest.jsonl")
 WORKERS = 8
 
 
@@ -46,20 +39,28 @@ def _init_worker():
 
 def hash_one(p):
     p = Path(p)
-    try:
-        with open(p, "rb") as f:
-            # stat the OPEN file: p.stat() before open() can describe a
-            # different inode if the path is replaced by rename in between
-            st = os.fstat(f.fileno())
-            magic = f.read(4)
-            # file_digest hashes from the CURRENT offset — without the
-            # seek(0) it silently hashes file[4:] and never matches sha256sum
-            f.seek(0)
-            h = hashlib.file_digest(f, "sha256").hexdigest()
-        return {"path": str(p), "size": st.st_size, "sha256": h,
-                "mtime": st.st_mtime, "magic_ok": magic == b"%PDF"}
-    except OSError as e:
-        return {"path": str(p), "error": repr(e)}
+    # MAJOR-fix: size/mtime were taken BEFORE hashing, so a file growing
+    # during the digest got a hash inconsistent with its recorded size.
+    # Re-fstat after hashing; retry once if the file moved under us.
+    for attempt in range(2):
+        try:
+            with open(p, "rb") as f:
+                st = os.fstat(f.fileno())
+                magic = f.read(4)
+                # file_digest hashes from the CURRENT offset — without the
+                # seek(0) it silently hashes file[4:] and never matches sha256sum
+                f.seek(0)
+                h = hashlib.file_digest(f, "sha256").hexdigest()
+                st2 = os.fstat(f.fileno())
+                stable = (st2.st_size, st2.st_mtime_ns) == (st.st_size, st.st_mtime_ns)
+                if not stable and attempt == 0:
+                    continue  # file changed during hashing — one retry
+                return {"path": str(p), "size": st2.st_size, "sha256": h,
+                        "mtime": st2.st_mtime, "magic_ok": magic == b"%PDF",
+                        "hash_stable": stable}
+        except OSError as e:
+            return {"path": str(p), "error": repr(e)}
+    return {"path": str(p), "error": "unstable file (changed during hashing twice)"}
 
 
 def _walk_err(exc):
@@ -67,10 +68,10 @@ def _walk_err(exc):
 
 
 def collect_pdfs():
-    # os.walk(followlinks=True), NOT rglob — stores with symlinked
-    # subdirectories are silently skipped by Path.rglob (it refuses to
-    # descend into symlinked dirs; a real run missed 3,151 of 10,427
-    # PDFs that `find -L` sees). followlinks can loop on symlink
+    # os.walk(followlinks=True), NOT rglob — the store contains symlinked
+    # subdirectories (e.g. fleet-orchestrator/orchestrator-raw) that
+    # Path.rglob silently refuses to descend into (missed 3,151 of
+    # 10,427 PDFs that find -L sees). followlinks can loop on symlink
     # cycles, so directories are pruned by (dev, ino).
     pdfs = []
     seen_dirs = set()

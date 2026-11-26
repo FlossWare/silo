@@ -172,6 +172,8 @@ def load_manifest(date):
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
+        if not isinstance(data, dict):
+            data = "corrupt"  # valid JSON of the wrong shape
     except (OSError, ValueError):
         data = "corrupt"
     with CACHE_LOCK:
@@ -188,28 +190,41 @@ def snapshot_dates():
         return []
 
 
+MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024   # refuse absurd snapshots
+MAX_SNAPSHOT_LINE = 4 * 1024 * 1024      # skip pathological lines
+
+
+def _snapshot_lines(path):
+    """Bounded line iterator over a snapshot file."""
+    if path.stat().st_size > MAX_SNAPSHOT_BYTES:
+        return None
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if len(line) <= MAX_SNAPSHOT_LINE:
+                yield line
+
+
 def pdf_summary(path):
     """Count totals for one snapshot file. Cached by mtime via caller."""
     total = bad_magic = errors = 0
     try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except Exception:
-                    errors += 1
-                    continue
-                if not isinstance(rec, dict):
-                    errors += 1
-                    continue
-                if "error" in rec:
-                    errors += 1
-                else:
-                    total += 1
-                    bad_magic += not rec.get("magic_ok", False)
+        for line in _snapshot_lines(path):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                errors += 1
+                continue
+            if not isinstance(rec, dict):
+                errors += 1
+                continue
+            if "error" in rec:
+                errors += 1
+            else:
+                total += 1
+                bad_magic += not rec.get("magic_ok", False)
     except OSError:
         return None
     return {"pdfs": total, "magic_failures": bad_magic, "unreadable": errors,
@@ -220,19 +235,18 @@ def pdf_records(path):
     """path -> (sha256, size, mtime) for diffing."""
     out = {}
     try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except Exception:
-                    continue
-                if not isinstance(rec, dict):
-                    continue
-                if "error" not in rec and "sha256" in rec:
-                    out[rec["path"]] = (rec["sha256"], rec.get("size"), rec.get("mtime"))
+        for line in _snapshot_lines(path):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if "error" not in rec and "sha256" in rec:
+                out[rec["path"]] = (rec["sha256"], rec.get("size"), rec.get("mtime"))
     except OSError:
         return None
     return out
@@ -242,8 +256,10 @@ def diff_days(date, date2):
     a, b = load_manifest(date), load_manifest(date2)
     if not isinstance(a, dict) or not isinstance(b, dict):
         return None
-    da = {d["top_level"]: d for d in a.get("directories", [])}
-    db = {d["top_level"]: d for d in b.get("directories", [])}
+    da = {d["top_level"]: d for d in a.get("directories", [])
+          if isinstance(d, dict) and "top_level" in d}
+    db = {d["top_level"]: d for d in b.get("directories", [])
+          if isinstance(d, dict) and "top_level" in d}
     added = sorted(set(da) - set(db))
     removed = sorted(set(db) - set(da))
     changed = {}
