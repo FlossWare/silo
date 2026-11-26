@@ -27,6 +27,31 @@ Corpus-store tooling for a harvested knowledge base — the answer to
   worker pool; unreadable files produce `{path, error}` records
   instead of aborting the run. Output is atomic. `SILO_PDF_ROOTS`
   (colon-separated) and `SILO_PDF_MANIFEST` env config.
+- **`silo-query.py`** — read-only query service over the artifacts the
+  batch tools produce (contract: `docs/contracts/silo-query.md`).
+  REST on `127.0.0.1` (`SILO_QUERY_PORT`, default 8791) plus a unix
+  socket (`$XDG_RUNTIME_DIR/flossware/silo.sock`). URL-existence and
+  provenance lookups against the master index (non-http URI schemes
+  like `concept://` included), manifest baseline listing and
+  directory-granularity diffs, PDF snapshot summaries and bounded
+  per-PDF diffs. Honest-unavailable semantics: missing artifacts are
+  reported per-artifact in `/ready` and return `503`, never silent
+  empties; reloads keep serving last-good rows. stdlib only.
+
+## Running the query service
+
+```sh
+SILO_ROOT=/path/to/store python3 silo-query.py
+curl 'http://127.0.0.1:8791/v1/urls?url=https://example.com/'
+curl --unix-socket "$XDG_RUNTIME_DIR/flossware/silo.sock" \
+     http://localhost/v1/pdfs
+```
+
+Deployment convention: the batch tools run via timers and write
+artifacts (including dated PDF snapshots under `pdf-snapshots/`); the
+service only reads them and hot-reloads on mtime change. Unit naming
+per [ADR-0034](https://github.com/FlossWare/standards/blob/main/adr/ADR-0034-runtime-function-namespaces-and-service-exposure.md):
+`flossware-silo-query.service`.
 
 ## Corpus layout convention
 
